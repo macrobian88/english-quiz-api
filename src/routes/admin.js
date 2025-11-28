@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const router = express.Router();
-const { createTopic, listTopics, getTopic, updateTopic, deleteTopic, bulkUpload } = require('../controllers/adminController');
+const { createTopic, listTopics, getTopic, updateTopic, deleteTopic, bulkUpload, debugTopic } = require('../controllers/adminController');
 const adminAuth = require('../middleware/adminAuth');
 const { validate } = require('../middleware/validateRequest');
 const { adminLimiter } = require('../middleware/rateLimiter');
@@ -55,9 +55,15 @@ router.get('/topics', validate('pagination', 'query'), listTopics);
 
 /**
  * GET /api/admin/topics/:topic_id
- * Get single topic details
+ * Get single topic details with sample chunks
  */
 router.get('/topics/:topic_id', getTopic);
+
+/**
+ * GET /api/admin/topics/:topic_id/debug
+ * Debug endpoint - Get detailed topic and chunk info
+ */
+router.get('/topics/:topic_id/debug', debugTopic);
 
 /**
  * PUT /api/admin/topics/:topic_id
