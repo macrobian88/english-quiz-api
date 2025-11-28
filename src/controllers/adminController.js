@@ -1,4 +1,5 @@
 const Topic = require('../models/Topic');
+const Chunk = require('../models/Chunk');
 const { processTopicFiles, updateTopicFiles, deleteTopic } = require('../services/chunkingService');
 const { parseVTT } = require('../services/vttParser');
 const logger = require('../utils/logger');
@@ -102,7 +103,7 @@ async function listTopics(req, res, next) {
 }
 
 /**
- * Get single topic
+ * Get single topic with chunk count
  * GET /api/admin/topics/:topic_id
  */
 async function getTopic(req, res, next) {
@@ -114,7 +115,27 @@ async function getTopic(req, res, next) {
       return res.status(404).json({ success: false, error: 'Topic not found' });
     }
 
-    res.json({ success: true, topic });
+    // Get actual chunk count from database
+    const chunkCount = await Chunk.countDocuments({ topic_id });
+    
+    // Get sample chunks (first 3)
+    const sampleChunks = await Chunk.find({ topic_id })
+      .sort({ chunk_index: 1 })
+      .limit(3)
+      .select('file_name chunk_index content');
+
+    res.json({ 
+      success: true, 
+      topic: {
+        ...topic.toObject(),
+        actual_chunk_count: chunkCount
+      },
+      sample_chunks: sampleChunks.map(c => ({
+        file_name: c.file_name,
+        chunk_index: c.chunk_index,
+        content_preview: c.content.substring(0, 200) + (c.content.length > 200 ? '...' : '')
+      }))
+    });
   } catch (error) {
     next(error);
   }
@@ -201,11 +222,53 @@ async function bulkUpload(req, res, next) {
   }
 }
 
+/**
+ * Debug endpoint - Get topic debug info
+ * GET /api/admin/topics/:topic_id/debug
+ */
+async function debugTopic(req, res, next) {
+  try {
+    const { topic_id } = req.params;
+    
+    const topic = await Topic.findOne({ topic_id });
+    const chunkCount = await Chunk.countDocuments({ topic_id });
+    const chunks = await Chunk.find({ topic_id })
+      .sort({ chunk_index: 1 })
+      .select('file_name chunk_index content embedding');
+
+    const hasEmbeddings = chunks.every(c => c.embedding && c.embedding.length > 0);
+    const embeddingDimensions = chunks[0]?.embedding?.length || 0;
+
+    res.json({
+      success: true,
+      debug: {
+        topic_exists: !!topic,
+        topic_id: topic_id,
+        topic_title: topic?.title || 'N/A',
+        chunk_count: chunkCount,
+        has_embeddings: hasEmbeddings,
+        embedding_dimensions: embeddingDimensions,
+        chunks: chunks.map(c => ({
+          file_name: c.file_name,
+          chunk_index: c.chunk_index,
+          content_length: c.content?.length || 0,
+          content_preview: c.content?.substring(0, 100) || '',
+          has_embedding: !!(c.embedding && c.embedding.length > 0),
+          embedding_length: c.embedding?.length || 0
+        }))
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   createTopic, 
   listTopics, 
   getTopic, 
   updateTopic, 
   deleteTopic: deleteTopicHandler, 
-  bulkUpload 
+  bulkUpload,
+  debugTopic
 };
