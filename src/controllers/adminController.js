@@ -1,18 +1,81 @@
 const Topic = require('../models/Topic');
 const { processTopicFiles, updateTopicFiles, deleteTopic } = require('../services/chunkingService');
+const { parseVTT } = require('../services/vttParser');
 const logger = require('../utils/logger');
 
+/**
+ * Process uploaded VTT files or JSON content
+ */
+function extractFilesFromRequest(req) {
+  const files = [];
+
+  // Option 1: Files uploaded via multipart/form-data
+  if (req.files && req.files.length > 0) {
+    for (const file of req.files) {
+      files.push({
+        filename: file.originalname,
+        content: file.buffer.toString('utf-8')
+      });
+    }
+    logger.info(`Extracted ${files.length} files from upload`);
+  }
+  
+  // Option 2: Files provided in JSON body
+  if (req.body.files && Array.isArray(req.body.files)) {
+    for (const file of req.body.files) {
+      if (file.filename && file.content) {
+        files.push({
+          filename: file.filename,
+          content: file.content
+        });
+      }
+    }
+    logger.info(`Extracted ${files.length} files from JSON body`);
+  }
+
+  return files;
+}
+
+/**
+ * Create topic - supports both file upload and JSON
+ * POST /api/admin/topics
+ */
 async function createTopic(req, res, next) {
   try {
-    const { topic_id, title, files, metadata } = req.body;
-    logger.info(`Creating topic: ${topic_id}`);
-    const result = await processTopicFiles(topic_id, title, files, metadata);
+    const { topic_id, title, metadata } = req.body;
+    
+    // Parse metadata if it's a string (from form-data)
+    let parsedMetadata = metadata;
+    if (typeof metadata === 'string') {
+      try {
+        parsedMetadata = JSON.parse(metadata);
+      } catch (e) {
+        parsedMetadata = {};
+      }
+    }
+
+    const files = extractFilesFromRequest(req);
+
+    if (files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No files provided. Upload VTT files or provide files in JSON body.'
+      });
+    }
+
+    logger.info(`Creating topic: ${topic_id} with ${files.length} files`);
+    const result = await processTopicFiles(topic_id, title, files, parsedMetadata);
+    
     res.status(201).json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
 }
 
+/**
+ * List topics with pagination
+ * GET /api/admin/topics
+ */
 async function listTopics(req, res, next) {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -38,6 +101,10 @@ async function listTopics(req, res, next) {
   }
 }
 
+/**
+ * Get single topic
+ * GET /api/admin/topics/:topic_id
+ */
 async function getTopic(req, res, next) {
   try {
     const { topic_id } = req.params;
@@ -53,18 +120,47 @@ async function getTopic(req, res, next) {
   }
 }
 
+/**
+ * Update topic - supports both file upload and JSON
+ * PUT /api/admin/topics/:topic_id
+ */
 async function updateTopic(req, res, next) {
   try {
     const { topic_id } = req.params;
-    const { title, files, metadata } = req.body;
-    logger.info(`Updating topic: ${topic_id}`);
-    const result = await updateTopicFiles(topic_id, title, files, metadata);
+    const { title, metadata } = req.body;
+
+    // Parse metadata if it's a string (from form-data)
+    let parsedMetadata = metadata;
+    if (typeof metadata === 'string') {
+      try {
+        parsedMetadata = JSON.parse(metadata);
+      } catch (e) {
+        parsedMetadata = undefined;
+      }
+    }
+
+    const files = extractFilesFromRequest(req);
+
+    if (files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No files provided. Upload VTT files or provide files in JSON body.'
+      });
+    }
+
+    logger.info(`Updating topic: ${topic_id} with ${files.length} files`);
+    const result = await updateTopicFiles(topic_id, title, files, parsedMetadata);
+    
     res.json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
 }
 
+/**
+ * Delete topic
+ * DELETE /api/admin/topics/:topic_id
+ */
 async function deleteTopicHandler(req, res, next) {
   try {
     const { topic_id } = req.params;
@@ -76,6 +172,10 @@ async function deleteTopicHandler(req, res, next) {
   }
 }
 
+/**
+ * Bulk upload topics (JSON only)
+ * POST /api/admin/topics/bulk
+ */
 async function bulkUpload(req, res, next) {
   try {
     const { topics } = req.body;
@@ -101,4 +201,11 @@ async function bulkUpload(req, res, next) {
   }
 }
 
-module.exports = { createTopic, listTopics, getTopic, updateTopic, deleteTopic: deleteTopicHandler, bulkUpload };
+module.exports = { 
+  createTopic, 
+  listTopics, 
+  getTopic, 
+  updateTopic, 
+  deleteTopic: deleteTopicHandler, 
+  bulkUpload 
+};
