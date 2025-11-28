@@ -32,7 +32,7 @@ const schemas = {
     user_id: Joi.string().required().min(1).max(100)
   }),
 
-  // Admin schemas
+  // Admin schemas - files are optional when using multipart upload
   createTopic: Joi.object({
     topic_id: Joi.string().required().min(1).max(100).pattern(/^[a-zA-Z0-9-_]+$/),
     title: Joi.string().required().min(1).max(200),
@@ -41,12 +41,15 @@ const schemas = {
         filename: Joi.string().required(),
         content: Joi.string().required()
       })
-    ).min(1).required(),
-    metadata: Joi.object({
-      difficulty: Joi.string().valid('beginner', 'intermediate', 'advanced'),
-      duration: Joi.string(),
-      tags: Joi.array().items(Joi.string())
-    }).optional()
+    ).optional(), // Optional because files can come from multipart upload
+    metadata: Joi.alternatives().try(
+      Joi.object({
+        difficulty: Joi.string().valid('beginner', 'intermediate', 'advanced'),
+        duration: Joi.string(),
+        tags: Joi.array().items(Joi.string())
+      }),
+      Joi.string() // Allow string for form-data JSON
+    ).optional()
   }),
 
   updateTopic: Joi.object({
@@ -56,12 +59,15 @@ const schemas = {
         filename: Joi.string().required(),
         content: Joi.string().required()
       })
-    ).min(1).required(),
-    metadata: Joi.object({
-      difficulty: Joi.string().valid('beginner', 'intermediate', 'advanced'),
-      duration: Joi.string(),
-      tags: Joi.array().items(Joi.string())
-    }).optional()
+    ).optional(), // Optional because files can come from multipart upload
+    metadata: Joi.alternatives().try(
+      Joi.object({
+        difficulty: Joi.string().valid('beginner', 'intermediate', 'advanced'),
+        duration: Joi.string(),
+        tags: Joi.array().items(Joi.string())
+      }),
+      Joi.string() // Allow string for form-data JSON
+    ).optional()
   }),
 
   bulkUpload: Joi.object({
