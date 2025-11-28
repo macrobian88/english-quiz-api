@@ -67,24 +67,52 @@ SCORING (0-${maxScore}):
 Be encouraging. Respond with ONLY JSON.`;
 }
 
-async function vectorSearch(topicId, query) {
-  const queryEmbedding = await generateEmbedding(query || 'english lesson');
+/**
+ * Get chunks for a topic - tries vector search first, falls back to regular query
+ */
+async function getTopicChunks(topicId, query) {
+  // First, check if any chunks exist for this topic
+  const chunkCount = await Chunk.countDocuments({ topic_id: topicId });
+  logger.info(`Found ${chunkCount} chunks for topic ${topicId}`);
+  
+  if (chunkCount === 0) {
+    return [];
+  }
 
-  const results = await Chunk.aggregate([
-    {
-      $vectorSearch: {
-        index: config.vectorSearch.indexName,
-        path: 'embedding',
-        queryVector: queryEmbedding,
-        numCandidates: config.vectorSearch.numCandidates,
-        limit: config.vectorSearch.limit,
-        filter: { topic_id: topicId }
-      }
-    },
-    { $project: { content: 1, file_name: 1, score: { $meta: 'vectorSearchScore' } } }
-  ]);
+  // Try vector search first
+  try {
+    const queryEmbedding = await generateEmbedding(query || 'english lesson');
+    
+    const results = await Chunk.aggregate([
+      {
+        $vectorSearch: {
+          index: config.vectorSearch.indexName,
+          path: 'embedding',
+          queryVector: queryEmbedding,
+          numCandidates: config.vectorSearch.numCandidates,
+          limit: config.vectorSearch.limit,
+          filter: { topic_id: topicId }
+        }
+      },
+      { $project: { content: 1, file_name: 1, chunk_index: 1, score: { $meta: 'vectorSearchScore' } } }
+    ]);
 
-  return results;
+    if (results.length > 0) {
+      logger.info(`Vector search returned ${results.length} chunks for topic ${topicId}`);
+      return results;
+    }
+  } catch (vectorError) {
+    logger.warn(`Vector search failed for topic ${topicId}, falling back to regular query: ${vectorError.message}`);
+  }
+
+  // Fallback: Regular MongoDB query (get all chunks for this topic)
+  const fallbackResults = await Chunk.find({ topic_id: topicId })
+    .sort({ chunk_index: 1 })
+    .limit(config.vectorSearch.limit)
+    .select('content file_name chunk_index');
+
+  logger.info(`Fallback query returned ${fallbackResults.length} chunks for topic ${topicId}`);
+  return fallbackResults;
 }
 
 function getPreviousQuestions(messages) {
@@ -178,16 +206,26 @@ function generateFinalSummary(conversation) {
 }
 
 async function startQuiz(userId, topicId, totalQuestions) {
+  // Check if topic exists
   const topic = await Topic.findOne({ topic_id: topicId });
-  if (!topic) throw new Error(`Topic ${topicId} not found`);
+  if (!topic) {
+    throw new Error(`Topic "${topicId}" not found. Please check the topic ID or create the topic first.`);
+  }
 
-  const relevantChunks = await vectorSearch(topicId, topic.title);
+  // Get chunks for this topic
+  const relevantChunks = await getTopicChunks(topicId, topic.title);
+  
+  if (!relevantChunks || relevantChunks.length === 0) {
+    throw new Error(`No content found for topic "${topicId}". Please upload VTT files for this topic.`);
+  }
+
   const context = relevantChunks.map(c => c.content).join('\n\n---\n\n');
-  if (!context) throw new Error('No content found for this topic');
+  logger.info(`Context length for topic ${topicId}: ${context.length} characters`);
 
   let conversation = await Conversation.findOne({ user_id: userId, topic_id: topicId, mode: 'quiz' });
   
   if (conversation) {
+    // Reset existing conversation
     conversation.current_question = 1;
     conversation.total_questions = totalQuestions;
     conversation.total_score = 0;
@@ -195,6 +233,7 @@ async function startQuiz(userId, topicId, totalQuestions) {
     conversation.status = 'in_progress';
     conversation.messages = [];
   } else {
+    // Create new conversation
     conversation = new Conversation({
       user_id: userId,
       topic_id: topicId,
@@ -208,6 +247,7 @@ async function startQuiz(userId, topicId, totalQuestions) {
     });
   }
 
+  // Generate first question
   const question = await generateQuestion(topic, context, 1, totalQuestions, []);
 
   conversation.messages.push({
@@ -219,7 +259,7 @@ async function startQuiz(userId, topicId, totalQuestions) {
   });
 
   await conversation.save();
-  logger.info(`Quiz started: user=${userId}, topic=${topicId}`);
+  logger.info(`Quiz started: user=${userId}, topic=${topicId}, questions=${totalQuestions}`);
 
   return {
     session_id: conversation._id.toString(),
@@ -244,9 +284,11 @@ async function submitAnswer(userId, topicId, userAnswer) {
   const lastQuestion = conversation.messages.filter(m => m.type === 'question').pop();
   if (!lastQuestion) throw new Error('No question to answer.');
 
-  const relevantChunks = await vectorSearch(topicId, lastQuestion.content);
+  // Get relevant chunks for evaluation
+  const relevantChunks = await getTopicChunks(topicId, lastQuestion.content);
   const context = relevantChunks.map(c => c.content).join('\n\n---\n\n');
 
+  // Save user's answer
   conversation.messages.push({
     role: 'user',
     type: 'answer',
@@ -255,9 +297,11 @@ async function submitAnswer(userId, topicId, userAnswer) {
     timestamp: new Date()
   });
 
+  // Evaluate answer
   const evaluation = await evaluateAnswer(topic, context, lastQuestion.content, userAnswer);
   const feedbackMessage = buildFeedbackMessage(evaluation);
 
+  // Save evaluation
   conversation.messages.push({
     role: 'assistant',
     type: 'evaluation',
@@ -273,6 +317,7 @@ async function submitAnswer(userId, topicId, userAnswer) {
   conversation.total_score += evaluation.score;
   conversation.max_possible_score += MAX_SCORE;
 
+  // Check if quiz is complete
   if (conversation.current_question >= conversation.total_questions) {
     conversation.status = 'completed';
     await conversation.save();
@@ -284,12 +329,19 @@ async function submitAnswer(userId, topicId, userAnswer) {
       question_number: conversation.current_question,
       total_questions: conversation.total_questions,
       your_answer: userAnswer,
-      evaluation: { score: evaluation.score, max_score: MAX_SCORE, is_correct: evaluation.is_correct, feedback: evaluation.feedback, feedback_message: feedbackMessage },
+      evaluation: { 
+        score: evaluation.score, 
+        max_score: MAX_SCORE, 
+        is_correct: evaluation.is_correct, 
+        feedback: evaluation.feedback, 
+        feedback_message: feedbackMessage 
+      },
       status: 'completed',
       final_results: generateFinalSummary(conversation)
     };
   }
 
+  // Generate next question
   conversation.current_question += 1;
   const previousQuestions = getPreviousQuestions(conversation.messages);
   const nextQuestion = await generateQuestion(topic, context, conversation.current_question, conversation.total_questions, previousQuestions);
@@ -311,7 +363,13 @@ async function submitAnswer(userId, topicId, userAnswer) {
     question_number: conversation.current_question,
     total_questions: conversation.total_questions,
     your_answer: userAnswer,
-    evaluation: { score: evaluation.score, max_score: MAX_SCORE, is_correct: evaluation.is_correct, feedback: evaluation.feedback, feedback_message: feedbackMessage },
+    evaluation: { 
+      score: evaluation.score, 
+      max_score: MAX_SCORE, 
+      is_correct: evaluation.is_correct, 
+      feedback: evaluation.feedback, 
+      feedback_message: feedbackMessage 
+    },
     next_question: nextQuestion,
     progress: {
       current_score: conversation.total_score,
