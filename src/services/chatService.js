@@ -23,24 +23,52 @@ RULES:
 5. Never make up information not in the context`;
 }
 
-async function vectorSearch(topicId, query) {
-  const queryEmbedding = await generateEmbedding(query);
+/**
+ * Get chunks for a topic - tries vector search first, falls back to regular query
+ */
+async function getTopicChunks(topicId, query) {
+  // First, check if any chunks exist for this topic
+  const chunkCount = await Chunk.countDocuments({ topic_id: topicId });
+  logger.info(`Found ${chunkCount} chunks for topic ${topicId}`);
+  
+  if (chunkCount === 0) {
+    return [];
+  }
 
-  const results = await Chunk.aggregate([
-    {
-      $vectorSearch: {
-        index: config.vectorSearch.indexName,
-        path: 'embedding',
-        queryVector: queryEmbedding,
-        numCandidates: config.vectorSearch.numCandidates,
-        limit: config.vectorSearch.limit,
-        filter: { topic_id: topicId }
-      }
-    },
-    { $project: { content: 1, score: { $meta: 'vectorSearchScore' } } }
-  ]);
+  // Try vector search first
+  try {
+    const queryEmbedding = await generateEmbedding(query || 'english lesson');
+    
+    const results = await Chunk.aggregate([
+      {
+        $vectorSearch: {
+          index: config.vectorSearch.indexName,
+          path: 'embedding',
+          queryVector: queryEmbedding,
+          numCandidates: config.vectorSearch.numCandidates,
+          limit: config.vectorSearch.limit,
+          filter: { topic_id: topicId }
+        }
+      },
+      { $project: { content: 1, file_name: 1, chunk_index: 1, score: { $meta: 'vectorSearchScore' } } }
+    ]);
 
-  return results;
+    if (results.length > 0) {
+      logger.info(`Vector search returned ${results.length} chunks for topic ${topicId}`);
+      return results;
+    }
+  } catch (vectorError) {
+    logger.warn(`Vector search failed for topic ${topicId}, falling back to regular query: ${vectorError.message}`);
+  }
+
+  // Fallback: Regular MongoDB query (get all chunks for this topic)
+  const fallbackResults = await Chunk.find({ topic_id: topicId })
+    .sort({ chunk_index: 1 })
+    .limit(config.vectorSearch.limit)
+    .select('content file_name chunk_index');
+
+  logger.info(`Fallback query returned ${fallbackResults.length} chunks for topic ${topicId}`);
+  return fallbackResults;
 }
 
 async function getConversationHistory(userId, topicId) {
@@ -69,10 +97,19 @@ async function saveConversation(userId, topicId, userMessage, assistantReply) {
 
 async function processChat(userId, topicId, message) {
   const topic = await Topic.findOne({ topic_id: topicId });
-  if (!topic) throw new Error(`Topic ${topicId} not found`);
+  if (!topic) {
+    throw new Error(`Topic "${topicId}" not found. Please check the topic ID or create the topic first.`);
+  }
 
-  const relevantChunks = await vectorSearch(topicId, message);
+  const relevantChunks = await getTopicChunks(topicId, message);
+  
+  if (!relevantChunks || relevantChunks.length === 0) {
+    throw new Error(`No content found for topic "${topicId}". Please upload VTT files for this topic.`);
+  }
+
   const context = relevantChunks.map(c => c.content).join('\n\n---\n\n');
+  logger.info(`Context length for topic ${topicId}: ${context.length} characters`);
+  
   const history = await getConversationHistory(userId, topicId);
 
   const messages = [
@@ -101,9 +138,16 @@ async function processChat(userId, topicId, message) {
 
 async function processChatStream(userId, topicId, message, onChunk, onComplete) {
   const topic = await Topic.findOne({ topic_id: topicId });
-  if (!topic) throw new Error(`Topic ${topicId} not found`);
+  if (!topic) {
+    throw new Error(`Topic "${topicId}" not found. Please check the topic ID or create the topic first.`);
+  }
 
-  const relevantChunks = await vectorSearch(topicId, message);
+  const relevantChunks = await getTopicChunks(topicId, message);
+  
+  if (!relevantChunks || relevantChunks.length === 0) {
+    throw new Error(`No content found for topic "${topicId}". Please upload VTT files for this topic.`);
+  }
+
   const context = relevantChunks.map(c => c.content).join('\n\n---\n\n');
   const history = await getConversationHistory(userId, topicId);
 
