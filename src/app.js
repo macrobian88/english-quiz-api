@@ -23,11 +23,35 @@ const app = express();
 
 // Security middleware
 app.use(helmet());
-app.use(cors({
-  origin: config.cors.origins,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'x-api-key', 'x-user-id']
-}));
+
+// CORS configuration - allow all origins in development
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // In development, allow all origins
+    if (config.nodeEnv === 'development') {
+      return callback(null, true);
+    }
+    
+    // In production, check against allowed origins
+    const allowedOrigins = config.cors.origins;
+    if (allowedOrigins === '*' || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-key', 'x-user-id', 'Authorization'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
+
+// Handle preflight requests
+app.options('*', cors(corsOptions));
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
@@ -64,6 +88,7 @@ const startServer = async () => {
 
     app.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} in ${config.nodeEnv} mode`);
+      logger.info('CORS enabled for all origins in development mode');
     });
   } catch (error) {
     logger.error('Failed to start server:', error);
