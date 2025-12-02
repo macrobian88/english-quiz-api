@@ -14,6 +14,7 @@ const chatRoutes = require('./routes/chat');
 const conversationRoutes = require('./routes/conversations');
 const adminRoutes = require('./routes/admin');
 const healthRoutes = require('./routes/health');
+const topicsRoutes = require('./routes/topics');
 
 // Middleware
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
@@ -72,10 +73,11 @@ app.use(generalLimiter);
 
 // Routes
 app.use('/health', healthRoutes);
+app.use('/api/topics', topicsRoutes);  // Public topics endpoint (no auth required)
 app.use('/api/quiz', quizRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/conversations', conversationRoutes);
-app.use('/api/admin', adminRoutes);
+app.use('/api/admin', adminRoutes);    // Admin endpoints (API key required)
 
 // Error handling
 app.use(notFoundHandler);
